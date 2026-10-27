@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- LinguaCheck: NEVER upload keys or secrets ---
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+*_secret*
