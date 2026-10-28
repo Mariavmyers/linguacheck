@@ -27,7 +27,7 @@ Everything in this repository — the code, the app, and the expert-written test
 - Ends with **candidate correction pairs** (model answer, expert answer, why), not just a score.
 
 ## Test set
-50 fictional, expert-written questions (25 medical, 25 legal and 25 finance). No real patient or client data is used anywhere.
+75 fictional, expert-written questions (25 medical, 25 legal and 25 finance). No real patient or client data is used anywhere.
 
 ## Status
 🚧 In progress during the hackathon.
