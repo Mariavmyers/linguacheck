@@ -138,7 +138,7 @@ JUDGE_INSTRUCTIONS = """You are an audit judge for cross-lingual consistency. Yo
 Find every place where the two answers would leave a reader with DIFFERENT facts: a different number, unit, dose, date, deadline, frequency, warning, right, risk, step, definition, or yes/no conclusion. Also find facts that appear in one answer and are missing from the other when they matter for safety or rights. Ignore differences in style, length, order or politeness that do not change the facts.
 
 Rules:
-- Quote the exact sentence from each answer as evidence. If a fact is missing in one language, quote the sentence from the language that has it and write "(missing)" for the other.
+- Quote the exact sentence from each answer as evidence (at most 40 words per quote). Inside the JSON, escape double quotes as \\" or use single quotes. If a fact is missing in one language, quote the sentence from the language that has it and write "(missing)" for the other.
 - Brazilian Portuguese writes decimals with a comma (2,5 = 2.5) and thousands with a dot (1.200 = 1,200). That is NOT a difference.
 - The question is about the UNITED STATES. If the PT-BR answer applies Brazilian law, Brazilian procedures or Brazilian products as if they were the US ones, that is fact_drift.
 {trap_block}
@@ -171,12 +171,20 @@ def build_judge_prompt(question, answer_en, answer_pt, domain, use_traps, cc):
 def parse_judge_json(text):
     """Pull the JSON object out of the judge's reply, even with extra text around it."""
     text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S | re.I)
+    text = re.sub(r"```(?:json)?", "", text)
     start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
+    if start == -1:
         return None
+    chunk = text[start:end + 1] if end > start else text[start:]
     try:
-        data = json.loads(text[start:end + 1])
+        data = json.loads(chunk)
     except json.JSONDecodeError:
+        try:  # repair common slips: unescaped quotes, trailing commas, cut-off endings
+            from json_repair import repair_json
+            data = repair_json(chunk, return_objects=True)
+        except Exception:
+            return None
+    if not isinstance(data, dict) or "findings" not in data:
         return None
     findings = data.get("findings") or []
     clean = []
@@ -209,6 +217,7 @@ def judge(question, answer_en, answer_pt, chat, use_traps=True):
         parsed = parse_judge_json(reply) or {
             "findings": [], "consistent": None,
             "error": "The judge did not return readable JSON.",
+            "raw": (reply or "(empty reply)")[:2000],
         }
     parsed["code_checks"] = cc
     parsed["use_traps"] = use_traps

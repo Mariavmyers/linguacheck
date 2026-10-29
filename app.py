@@ -80,11 +80,14 @@ def get_client():
     return OpenAI(api_key=key, base_url=BASE_URL)
 
 
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "16000"))  # room for the model's reasoning + answer
+
+
 def chat(messages, client=None):
     """Send messages to the Meta model at temperature 0, return the final answer only."""
     client = client or get_client()
     resp = client.chat.completions.create(
-        model=MODEL, messages=messages, temperature=0, max_tokens=4096,
+        model=MODEL, messages=messages, temperature=0, max_tokens=MAX_TOKENS,
     )
     return final_answer_only(resp.choices[0].message)
 
@@ -217,7 +220,7 @@ def audit_question(q, client=None):
 BATCH = {"running": False, "done": 0, "total": 0, "results": [], "errors": [],
          "started": None, "finished": None, "files": []}
 _batch_lock = threading.Lock()
-BATCH_WORKERS = 4
+BATCH_WORKERS = int(os.getenv("BATCH_WORKERS", "8"))
 
 
 def _short(s, n=220):
@@ -233,7 +236,8 @@ def compact_result(r):
     return {"id": r["id"], "domain": r["domain"], "category": r["category"], "risk": r["risk"],
             "with": fs(r["with_traps"]["findings"]),
             "without": fs(r["without_traps"]["findings"]),
-            "judge_error": r["with_traps"].get("error") or r["without_traps"].get("error")}
+            "judge_error": r["with_traps"].get("error") or r["without_traps"].get("error"),
+            "judge_raw": _short(r["with_traps"].get("raw") or r["without_traps"].get("raw"), 600)}
 
 
 def _write_batch_files(stamp):
@@ -308,11 +312,14 @@ def batch_status():
     drift_without = sum(1 for r in results if r["without_traps"]["findings"])
     high = sum(1 for r in results
                if any(f["severity"] == "high" for f in r["with_traps"]["findings"]))
+    unjudged = sum(1 for r in results
+                   if r["with_traps"].get("error") or r["without_traps"].get("error"))
     state = "⏳ Running" if b["running"] else "✅ Finished"
     md = (f"### {state}: {b['done']} of {b['total']} questions\n"
           f"- Questions with at least one flag **with** the trap file: **{drift_with}**\n"
           f"- Questions with at least one flag **without** the trap file: **{drift_without}**\n"
           f"- Questions with a **high-severity** flag: **{high}**\n"
+          f"- Judge could not read its own reply (not counted as clean): **{unjudged}**\n"
           f"- Errors: {len(errors)}" + ("\n\n" + "\n".join(f"  - {e}" for e in errors[:10]) if errors else ""))
     summary = json.dumps({"state": "running" if b["running"] else "finished",
                           "done": b["done"], "total": b["total"], "errors": errors,

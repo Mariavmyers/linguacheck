@@ -156,3 +156,17 @@ def test_full_run_in_background(tmp_path, monkeypatch):
     assert {r["id"] for r in data["results"]} == {"M04", "L09", "F10"}
     assert data["results"][0]["with"][0]["pt"] == "Tome 25 mL."
     assert len(files) == 2 and all(Path(f).exists() for f in files)
+
+
+def test_judge_json_with_unescaped_quotes_is_repaired():
+    bad = ('{"findings": [{"type": "missing", "severity": "high", "en_quote": "(missing)", '
+           '"pt_quote": "Ela disse "pare" agora", "explanation": "x", "trap_id": null}], '
+           '"consistent": false}')
+    parsed = judge.parse_judge_json(bad)
+    assert parsed and parsed["findings"][0]["severity"] == "high"
+
+
+def test_unreadable_judge_reply_is_kept_for_debugging():
+    q = app.QUESTIONS["M04"]
+    result = judge.judge(q, "2.5 mL", "2,5 mL", lambda s, u: "")
+    assert result["error"] and result["raw"] == "(empty reply)"
