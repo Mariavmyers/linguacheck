@@ -70,7 +70,6 @@ FT18,Finance,collateral on a loan,colateral = lateral,garantia do empréstimo,P,
 FT19,Finance,margin call,margem = borda ou espaço livre,chamada de margem; exigência de garantia adicional,P,Maria's list (Oct 29)
 FT20,Finance,currency appreciation,apreciação = avaliação/opinião positiva,valorização da moeda,P,Maria's list (Oct 29)
 FT21,Finance,settlement (securities trade),assentamento = estabelecimento/registro,liquidação da operação,P,Maria's list (Oct 29)
-FT22,Finance,capital city (issuer address),capital = recursos financeiros,capital do estado ou país,P,Maria's list (Oct 29)
 FT23,Finance,provision for losses,provisão = fornecimento ou estoque,provisão contábil para perdas,P,Maria's list (Oct 29)
 FT24,Finance,comprehensive insurance coverage,compreensivo = empático,cobertura abrangente,F,Maria's list (Oct 29)
 FT25,Finance,actual cash value,atual = presente,valor real em dinheiro; valor efetivo em dinheiro (dependendo da apólice),F,Maria's list (Oct 29)
