@@ -8,6 +8,7 @@ The API key is read from the BASETEN_API_KEY environment variable
 """
 
 import csv
+import html
 import json
 import os
 import re
@@ -17,6 +18,8 @@ from pathlib import Path
 
 import gradio as gr
 from dotenv import load_dotenv
+
+import judge
 
 load_dotenv()
 
@@ -63,45 +66,56 @@ def final_answer_only(message):
     return text
 
 
+def get_client():
+    from openai import OpenAI
+
+    key = os.getenv("BASETEN_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError(
+            "No API key found. Put BASETEN_API_KEY=your-key in the .env file "
+            "(or in the Space's Secrets) and restart the app."
+        )
+    return OpenAI(api_key=key, base_url=BASE_URL)
+
+
+def chat(messages, client=None):
+    """Send messages to the Meta model at temperature 0, return the final answer only."""
+    client = client or get_client()
+    resp = client.chat.completions.create(
+        model=MODEL, messages=messages, temperature=0, max_tokens=4096,
+    )
+    return final_answer_only(resp.choices[0].message)
+
+
 def ask_model(question, client=None):
     """Send one question, return (final answer, seconds taken)."""
-    if client is None:
-        from openai import OpenAI
-
-        key = os.getenv("BASETEN_API_KEY", "").strip()
-        if not key:
-            raise RuntimeError(
-                "No API key found. Put BASETEN_API_KEY=your-key in the .env file "
-                "(or in the Space's Secrets) and restart the app."
-            )
-        client = OpenAI(api_key=key, base_url=BASE_URL)
-
     start = time.time()
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": question}],
-        temperature=0,
-        max_tokens=4096,
-    )
-    answer = final_answer_only(resp.choices[0].message)
+    answer = chat([{"role": "user", "content": question}], client=client)
     if not answer:
         answer = "(The model returned reasoning but no final answer. Try again.)"
     return answer, round(time.time() - start, 1)
 
 
+def judge_chat(client=None):
+    """The judge uses the same Meta model, with a system message."""
+    def _chat(system, user):
+        return chat([{"role": "system", "content": system},
+                     {"role": "user", "content": user}], client=client)
+    return _chat
+
+
+def log(record, file=None):
+    file = file or RESULTS_FILE
+    file.parent.mkdir(exist_ok=True)
+    record = {"time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "model": MODEL, "temperature": 0, **record}
+    with open(file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def save_result(qid, lang, question, answer, seconds):
-    RESULTS_FILE.parent.mkdir(exist_ok=True)
-    with open(RESULTS_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "id": qid,
-            "lang": lang,
-            "model": MODEL,
-            "temperature": 0,
-            "question": question,
-            "answer": answer,
-            "seconds": seconds,
-        }, ensure_ascii=False) + "\n")
+    log({"kind": "answer", "id": qid, "lang": lang, "question": question,
+         "answer": answer, "seconds": seconds})
 
 
 # ---------------------------------------------------------------- UI logic
@@ -119,21 +133,68 @@ def show_question(qid):
     return q["question_en"], q["question_pt"], key
 
 
-def run_audit(qid, client=None):
+SEVERITY_ICON = {"high": "🔴 High", "medium": "🟠 Medium", "low": "🟡 Low"}
+TYPE_LABEL = {"fact_drift": "Fact drift", "missing": "Missing in one language",
+              "language_trap": "Interpreter trap"}
+
+
+def esc(s):
+    return html.escape(str(s or "")).replace("\n", "<br>")
+
+
+def render_findings(result):
+    """Flags as cards: the EN sentence and the PT sentence side by side."""
+    if result.get("error"):
+        return f"⚠️ Judge problem: {esc(result['error'])}"
+    cc = result["code_checks"]
+    traps_note = "with the interpreter trap file" if result["use_traps"] else "WITHOUT the trap file"
+    findings = result["findings"]
+    head = (f"<h3>{'✅ No drift found' if not findings else f'🚩 {len(findings)} flag(s)'}"
+            f" <small>(judge: {esc(MODEL_LABEL)}, {traps_note})</small></h3>")
+    cards = []
+    order = {"high": 0, "medium": 1, "low": 2}
+    for f in sorted(findings, key=lambda f: order.get(f["severity"], 3)):
+        trap = f" · trap {esc(f['trap_id'])}" if f.get("trap_id") else ""
+        cards.append(
+            "<div style='border:1px solid #8884;border-radius:8px;padding:10px;margin:8px 0'>"
+            f"<b>{SEVERITY_ICON.get(f['severity'], f['severity'])} · "
+            f"{TYPE_LABEL.get(f['type'], esc(f['type']))}{trap}</b><br>{esc(f['explanation'])}"
+            "<div style='display:flex;gap:10px;margin-top:8px;flex-wrap:wrap'>"
+            f"<div style='flex:1;min-width:220px;background:#3b82f61a;padding:8px;border-radius:6px'>"
+            f"<b>EN says</b><br>{esc(f['en_quote'])}</div>"
+            f"<div style='flex:1;min-width:220px;background:#22c55e1a;padding:8px;border-radius:6px'>"
+            f"<b>PT-BR says</b><br>{esc(f['pt_quote'])}</div></div></div>"
+        )
+    code_lines = judge.code_checks_text(cc)
+    code = f"<details><summary>Code check (numbers and dates)</summary>{esc(code_lines)}</details>"
+    return head + "".join(cards) + code
+
+
+def run_audit(qid, use_traps=True, client=None):
     q = QUESTIONS.get(qid)
     if not q:
         msg = "Pick a question first."
-        return msg, msg, ""
-    out = {}
+        return msg, msg, "", ""
+    out, answers = {}, {}
     for lang, field in (("EN", "question_en"), ("PT-BR", "question_pt")):
         try:
             answer, secs = ask_model(q[field], client=client)
             save_result(qid, lang, q[field], answer, secs)
+            answers[lang] = answer
             out[lang] = f"{DISCLAIMER}\n\n{answer}\n\n*({secs} s)*"
         except Exception as e:  # show the problem in plain words, don't crash
             out[lang] = f"❌ Could not get an answer: {e}"
+    if len(answers) < 2:
+        return out["EN"], out["PT-BR"], "", "Could not compare: one answer is missing."
+    try:
+        result = judge.judge(q, answers["EN"], answers["PT-BR"],
+                             judge_chat(client), use_traps=use_traps)
+        log({"kind": "judgment", "id": qid, **result})
+        flags = render_findings(result)
+    except Exception as e:
+        flags = f"❌ The judge could not run: {esc(e)}"
     status = f"Done · {MODEL_LABEL} · temperature 0 · saved to results/answers.jsonl"
-    return out["EN"], out["PT-BR"], status
+    return out["EN"], out["PT-BR"], flags, status
 
 
 # ---------------------------------------------------------------- page
@@ -154,7 +215,11 @@ with gr.Blocks(title="LinguaCheck") as demo:
         q_en = gr.Textbox(label="Question (EN)", lines=4, interactive=False)
         q_pt = gr.Textbox(label="Pergunta (PT-BR)", lines=4, interactive=False)
     key_box = gr.Markdown()
-    go = gr.Button("Ask Meta's model in both languages", variant="primary")
+    with gr.Row():
+        use_traps = gr.Checkbox(value=True, label=(
+            f"Use the interpreter trap file ({len(judge.TRAPS)} verified traps)"))
+        go = gr.Button("Ask Meta's model in both languages and compare", variant="primary")
+    flags = gr.HTML()
     with gr.Row():
         a_en = gr.Markdown(label="Answer (EN)")
         a_pt = gr.Markdown(label="Resposta (PT-BR)")
@@ -162,7 +227,7 @@ with gr.Blocks(title="LinguaCheck") as demo:
 
     pick.change(show_question, inputs=pick, outputs=[q_en, q_pt, key_box])
     demo.load(show_question, inputs=pick, outputs=[q_en, q_pt, key_box])
-    go.click(run_audit, inputs=pick, outputs=[a_en, a_pt, status])
+    go.click(run_audit, inputs=[pick, use_traps], outputs=[a_en, a_pt, flags, status])
 
 
 if __name__ == "__main__":

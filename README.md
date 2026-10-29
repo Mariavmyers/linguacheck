@@ -45,7 +45,9 @@ Everything in this repository — the code, the app, and the expert-written test
 3. Copy `.env.example` to `.env` and paste your Baseten key after `BASETEN_API_KEY=` (`.env` never goes to GitHub).
 4. `python app.py`, then open the link it prints (usually http://127.0.0.1:7860).
 
-Every answer is saved to `results/answers.jsonl` (kept on your computer only).
+Every answer and judgment is saved to `results/answers.jsonl` (kept on your computer only).
+
+To audit the whole test set with and without the trap file: `python run_all.py` (or `python run_all.py M01 L03` for a few questions).
 
 ## Run it on Hugging Face Spaces
 Create a Gradio Space from this repository and add `BASETEN_API_KEY` under **Settings → Variables and secrets → New secret**. Never put the key in the code.
@@ -53,8 +55,12 @@ Create a Gradio Space from this repository and add `BASETEN_API_KEY` under **Set
 ## Status
 🚧 In progress during the hackathon.
 
-- ✅ v1: ask Muse Spark Open the same question in EN and PT-BR (temperature 0) and show both final answers side by side with the interpreter's answer key
-- ⏳ Next: the judge (exact checks for numbers, units and dates in code, then a Meta model judging meaning), the interpreter trap file, and accuracy against the expert labels
+- ✅ Ask Muse Spark Open the same question in EN and PT-BR (temperature 0) and show both final answers side by side with the interpreter's answer key
+- ✅ Judge, layer 1 (code): exact comparison of numbers and dates, aware of the Brazilian decimal comma (2,5 = 2.5), thousands dot (1.200 = 1,200) and US vs. Brazilian date order
+- ✅ Judge, layer 2 (Meta model): finds fact drift, missing facts and interpreter traps, quoting the exact EN and PT-BR sentences as evidence, with a severity level
+- ✅ Interpreter trap file (`data/traps.csv`): 82 traps (25 medical, 25 legal, 25 finance, plus 7 confirmed rules), switchable on/off to measure what interpreter knowledge adds
+- ✅ `python run_all.py`: runs the whole test set with and without the trap file and writes a review sheet for the expert to mark each flag "real" or "false alarm"
+- ⏳ Next: run on the full set, measure accuracy against the expert's labels, add Muse Spark via the Meta Model API
 
 ## License
 MIT
