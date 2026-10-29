@@ -70,7 +70,8 @@ def styles():
 
 
 def esc(s):
-    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    s = str(s or "").replace("**", "").replace("`", "")
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
 def fig_png(fig):
@@ -136,8 +137,9 @@ def chart_by_type(results):
         bars = ax.barh([TYPE_LABEL[t] for t in types], vals, left=left, height=0.55,
                        color=SEV_COLOR[sev], label=SEV_LABEL[sev],
                        edgecolor=SURFACE, linewidth=2)
+        biggest = max(1, max(sum(cnt[(t, x)] for x in SEV_ORDER) for t in types))
         for b, v, l0 in zip(bars, vals, left):
-            if v:
+            if v and v >= biggest * 0.06:
                 ax.text(l0 + v / 2, b.get_y() + b.get_height() / 2, str(v), ha="center",
                         va="center", fontsize=8.5, color=INK)
         left = [a + b for a, b in zip(left, vals)]
@@ -158,18 +160,19 @@ def chart_by_type(results):
 
 def hero_table(results, st):
     n = len(results)
-    drift_w = sum(1 for r in results if r["with"])
+    differ = sum(1 for r in results if r["with"])
+    contra = sum(1 for r in results if any(f["type"] == "fact_drift" for f in r["with"]))
+    danger = sum(1 for r in results
+                 if any(f["type"] == "fact_drift" and f["sev"] == "high" for f in r["with"]))
     drift_wo = sum(1 for r in results if r["without"])
-    high = sum(1 for r in results if any(f["sev"] == "high" for f in r["with"]))
-    traps = sum(1 for r in results for f in r["with"] if f["type"] == "language_trap")
     cells = [
-        (f"{drift_w} of {n}", "questions where Meta's model said something different in "
-                              "Portuguese (with the interpreter trap file)"),
-        (f"{high}", "questions with at least one HIGH-severity difference "
-                    "(could cause harm, a wrong dose, a missed deadline or a lost right)"),
-        (f"{drift_wo} → {drift_w}", "questions flagged without → with the interpreter trap file"),
-        (f"{traps}", "interpreter-trap flags (false friends, calques, register) "
-                     "that only the trap file catches"),
+        (f"{differ} of {n}", "questions where Meta's model's Portuguese answer differed from "
+                             "its English answer (any flag)"),
+        (f"{contra} of {n}", "questions where the two answers CONTRADICT each other "
+                             "(different facts, numbers, rights or steps)"),
+        (f"{danger}", "high-severity contradictions: could cause harm, delay care, "
+                      "or cost someone a right"),
+        (f"{drift_wo} → {differ}", "questions flagged without → with the interpreter trap file"),
     ]
     row = [[Paragraph(esc(v), st["hero"]), ] for v, _ in cells]
     lab = [[Paragraph(esc(l), st["herolab"])] for _, l in cells]
@@ -184,11 +187,17 @@ def hero_table(results, st):
     return t
 
 
-def findings_table(results, st):
+TYPE_ORDER = {"fact_drift": 0, "language_trap": 1, "missing": 2}
+
+
+def findings_table(results, st, only=None):
     rows = []
     for r in results:
         for f in r["with"]:
-            rows.append((SEV_ORDER.get(f["sev"], 3), r["id"], r["domain"], f))
+            if only and not only(f):
+                continue
+            rows.append(((TYPE_ORDER.get(f["type"], 3), SEV_ORDER.get(f["sev"], 3)),
+                         r["id"], r["domain"], f))
     rows.sort(key=lambda x: (x[0], x[1]))
     head = ["ID", "Severity", "Type", "English answer says", "Portuguese answer says",
             "Why it matters"]
@@ -246,12 +255,22 @@ def build(summary, out_path, model="Muse Spark Open (Meta, open weights) via Bas
                    colWidths=[4.95 * inch, 4.95 * inch])
     story += [charts, PageBreak()]
 
+    spot, ns = findings_table(results, st,
+                              only=lambda f: f["type"] == "fact_drift" and f["sev"] == "high")
+    story += [Paragraph(f"Spotlight: the {ns} most dangerous contradictions", st["h2"]),
+              Paragraph("Same question, same model, different facts depending on the language. "
+                        "A difference shows the answers cannot both be right; the interpreter "
+                        "decides which one is wrong (sometimes it is the English).", st["muted"]),
+              Spacer(1, 6), spot, PageBreak()]
     table, n = findings_table(results, st)
-    story += [Paragraph(f"What went wrong: all {n} flags (with the interpreter trap file), "
-                        "most serious first", st["h2"]),
-              Paragraph("Each row quotes the exact sentence from each answer. These flags come "
-                        "from the automatic judge and still need the interpreter's review "
-                        "(real or false alarm) before they count toward the accuracy score.",
+    story += [Paragraph(f"What went wrong: all {n} flags (with the interpreter trap file)",
+                        st["h2"]),
+              Paragraph("Order: contradictions first, then interpreter traps, then facts missing "
+                        "in one language; most serious first within each. Each row quotes the exact "
+                        "sentences. These flags come from the automatic judge and still need the "
+                        "interpreter's review (real or false alarm) before they count toward the "
+                        "accuracy score. 'Missing in one language' flags are the most likely to "
+                        "include false alarms (extra detail rather than a real difference).",
                         st["muted"]),
               Spacer(1, 6), table, Spacer(1, 14)]
 
