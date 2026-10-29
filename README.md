@@ -1,3 +1,13 @@
+---
+title: LinguaCheck
+emoji: 🩺
+colorFrom: blue
+colorTo: green
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # LinguaCheck
 
 **Benchmarks ask *"is the AI right?"* LinguaCheck asks *"does the AI say the same thing in every language?"***
@@ -29,8 +39,22 @@ Everything in this repository — the code, the app, and the expert-written test
 ## Test set
 75 fictional, expert-written questions (25 medical, 25 legal and 25 finance). No real patient or client data is used anywhere.
 
+## Run it on your computer
+1. Install Python 3.10 or newer.
+2. In this folder: `pip install -r requirements.txt`
+3. Copy `.env.example` to `.env` and paste your Baseten key after `BASETEN_API_KEY=` (`.env` never goes to GitHub).
+4. `python app.py`, then open the link it prints (usually http://127.0.0.1:7860).
+
+Every answer is saved to `results/answers.jsonl` (kept on your computer only).
+
+## Run it on Hugging Face Spaces
+Create a Gradio Space from this repository and add `BASETEN_API_KEY` under **Settings → Variables and secrets → New secret**. Never put the key in the code.
+
 ## Status
 🚧 In progress during the hackathon.
+
+- ✅ v1: ask Muse Spark Open the same question in EN and PT-BR (temperature 0) and show both final answers side by side with the interpreter's answer key
+- ⏳ Next: the judge (exact checks for numbers, units and dates in code, then a Meta model judging meaning), the interpreter trap file, and accuracy against the expert labels
 
 ## License
 MIT

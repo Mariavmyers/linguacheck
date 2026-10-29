@@ -226,3 +226,7 @@ __marimo__/
 *.key
 secrets/
 *_secret*
+
+# LinguaCheck local run output
+results/
+.gradio/
