@@ -137,3 +137,22 @@ def test_bad_judge_reply_retries_then_reports():
     q = app.QUESTIONS["M04"]
     result = judge.judge(q, "2.5 mL", "2,5 mL", chat)
     assert len(calls) == 2 and result.get("error")
+
+
+# ---------------------------------------------------------------- full run button
+
+def test_full_run_in_background(tmp_path, monkeypatch):
+    import time as _t
+    monkeypatch.setattr(app, "RESULTS_FILE", tmp_path / "answers.jsonl")
+    monkeypatch.setattr(app, "QUESTIONS", {k: app.QUESTIONS[k] for k in ("M04", "L09", "F10")})
+    md, summary, files = app.start_batch(client=FakeClient())
+    for _ in range(100):
+        if not app.BATCH["running"]:
+            break
+        _t.sleep(0.05)
+    md, summary, files = app.batch_status()
+    data = json.loads(summary)
+    assert "Finished" in md and data["done"] == 3 and not data["errors"]
+    assert {r["id"] for r in data["results"]} == {"M04", "L09", "F10"}
+    assert data["results"][0]["with"][0]["pt"] == "Tome 25 mL."
+    assert len(files) == 2 and all(Path(f).exists() for f in files)

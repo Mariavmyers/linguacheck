@@ -19,21 +19,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import app
-import judge
+
 
 WORKERS = 4  # questions handled at the same time
 
 
-def run_one(q, client):
-    answers = {}
-    for lang, field in (("EN", "question_en"), ("PT-BR", "question_pt")):
-        answers[lang], _ = app.ask_model(q[field], client=client)
-    out = {"id": q["id"], "domain": q["domain"], "risk": q["risk"],
-           "answer_en": answers["EN"], "answer_pt": answers["PT-BR"]}
-    for use in (True, False):
-        out["with_traps" if use else "without_traps"] = judge.judge(
-            q, answers["EN"], answers["PT-BR"], app.judge_chat(client), use_traps=use)
-    return out
+run_one = app.audit_question  # same logic as the app's "Run all questions" button
 
 
 def main(ids):

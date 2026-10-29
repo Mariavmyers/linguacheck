@@ -12,7 +12,9 @@ import html
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -197,6 +199,129 @@ def run_audit(qid, use_traps=True, client=None):
     return out["EN"], out["PT-BR"], flags, status
 
 
+# ---------------------------------------------------------------- full test-set run
+
+def audit_question(q, client=None):
+    """EN + PT answers once, then the judge WITH and WITHOUT the trap file."""
+    answers = {}
+    for lang, field in (("EN", "question_en"), ("PT-BR", "question_pt")):
+        answers[lang], _ = ask_model(q[field], client=client)
+    out = {"id": q["id"], "domain": q["domain"], "category": q["category"],
+           "risk": q["risk"], "answer_en": answers["EN"], "answer_pt": answers["PT-BR"]}
+    for use in (True, False):
+        out["with_traps" if use else "without_traps"] = judge.judge(
+            q, answers["EN"], answers["PT-BR"], judge_chat(client), use_traps=use)
+    return out
+
+
+BATCH = {"running": False, "done": 0, "total": 0, "results": [], "errors": [],
+         "started": None, "finished": None, "files": []}
+_batch_lock = threading.Lock()
+BATCH_WORKERS = 4
+
+
+def _short(s, n=220):
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def compact_result(r):
+    def fs(findings):
+        return [{"type": f["type"], "sev": f["severity"], "trap": f.get("trap_id"),
+                 "en": _short(f["en_quote"]), "pt": _short(f["pt_quote"]),
+                 "why": _short(f["explanation"], 300)} for f in findings]
+    return {"id": r["id"], "domain": r["domain"], "category": r["category"], "risk": r["risk"],
+            "with": fs(r["with_traps"]["findings"]),
+            "without": fs(r["without_traps"]["findings"]),
+            "judge_error": r["with_traps"].get("error") or r["without_traps"].get("error")}
+
+
+def _write_batch_files(stamp):
+    base = RESULTS_FILE.parent
+    base.mkdir(exist_ok=True)
+    results = sorted(BATCH["results"], key=lambda r: r["id"])
+    full = base / f"full_run_{stamp}.jsonl"
+    with open(full, "w", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    review = base / f"review_{stamp}.csv"
+    with open(review, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "domain", "trap_file", "type", "severity", "trap_id",
+                    "en_quote", "pt_quote", "explanation", "maria_says (real / false alarm)"])
+        for r in results:
+            for mode, key in (("with", "with_traps"), ("without", "without_traps")):
+                for x in r[key]["findings"]:
+                    w.writerow([r["id"], r["domain"], mode, x["type"], x["severity"],
+                                x.get("trap_id") or "", x["en_quote"], x["pt_quote"],
+                                x["explanation"], ""])
+    return [str(full), str(review)]
+
+
+def _batch_worker(ids, client):
+    with ThreadPoolExecutor(BATCH_WORKERS) as pool:
+        futures = {pool.submit(audit_question, QUESTIONS[i], client): i for i in ids}
+        for fut in as_completed(futures):
+            qid = futures[fut]
+            try:
+                r = fut.result()
+                log({"kind": "batch_result", **r})
+                with _batch_lock:
+                    BATCH["results"].append(r)
+            except Exception as e:
+                with _batch_lock:
+                    BATCH["errors"].append(f"{qid}: {e}")
+            with _batch_lock:
+                BATCH["done"] += 1
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    with _batch_lock:
+        BATCH["files"] = _write_batch_files(stamp)
+        BATCH["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        BATCH["running"] = False
+
+
+def start_batch(client=None):
+    with _batch_lock:
+        if BATCH["running"]:
+            return batch_status()
+    try:
+        client = client or get_client()
+    except Exception as e:
+        return f"❌ {e}", "", None
+    ids = list(QUESTIONS)
+    with _batch_lock:
+        BATCH.update(running=True, done=0, total=len(ids), results=[], errors=[],
+                     started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                     finished=None, files=[])
+    threading.Thread(target=_batch_worker, args=(ids, client), daemon=True).start()
+    return batch_status()
+
+
+def batch_status():
+    with _batch_lock:
+        b = dict(BATCH)
+        results = sorted(b["results"], key=lambda r: r["id"])
+        errors = list(b["errors"])
+    if not b["total"]:
+        return "No full run yet.", "", None
+    drift_with = sum(1 for r in results if r["with_traps"]["findings"])
+    drift_without = sum(1 for r in results if r["without_traps"]["findings"])
+    high = sum(1 for r in results
+               if any(f["severity"] == "high" for f in r["with_traps"]["findings"]))
+    state = "⏳ Running" if b["running"] else "✅ Finished"
+    md = (f"### {state}: {b['done']} of {b['total']} questions\n"
+          f"- Questions with at least one flag **with** the trap file: **{drift_with}**\n"
+          f"- Questions with at least one flag **without** the trap file: **{drift_without}**\n"
+          f"- Questions with a **high-severity** flag: **{high}**\n"
+          f"- Errors: {len(errors)}" + ("\n\n" + "\n".join(f"  - {e}" for e in errors[:10]) if errors else ""))
+    summary = json.dumps({"state": "running" if b["running"] else "finished",
+                          "done": b["done"], "total": b["total"], "errors": errors,
+                          "results": [compact_result(r) for r in results]},
+                         ensure_ascii=False)
+    files = b["files"] or None
+    return md, summary, files
+
+
 # ---------------------------------------------------------------- page
 
 with gr.Blocks(title="LinguaCheck") as demo:
@@ -228,6 +353,21 @@ with gr.Blocks(title="LinguaCheck") as demo:
     pick.change(show_question, inputs=pick, outputs=[q_en, q_pt, key_box])
     demo.load(show_question, inputs=pick, outputs=[q_en, q_pt, key_box])
     go.click(run_audit, inputs=[pick, use_traps], outputs=[a_en, a_pt, flags, status])
+
+    with gr.Accordion("Full audit: run all questions (with and without the trap file)",
+                      open=False):
+        gr.Markdown("Runs every verified question in English and Portuguese, then judges "
+                    "each pair twice. Takes a while; press Refresh to see progress.")
+        with gr.Row():
+            run_all_btn = gr.Button("Run all questions")
+            refresh_btn = gr.Button("Refresh progress")
+        batch_md = gr.Markdown()
+        batch_json = gr.Textbox(label="Results (JSON)", lines=4, max_lines=8,
+                                elem_id="batch-json")
+        batch_files = gr.File(label="Download full results and review sheet",
+                              file_count="multiple")
+    run_all_btn.click(start_batch, outputs=[batch_md, batch_json, batch_files])
+    refresh_btn.click(batch_status, outputs=[batch_md, batch_json, batch_files])
 
 
 if __name__ == "__main__":
