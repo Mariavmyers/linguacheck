@@ -319,3 +319,23 @@ def test_confirmed_errors_translations(local_storage):
     for t in ("the government&#x27;s fault", "loan shark", "note in English", "bail bond agent",
               "English translation"):
         assert t in h, t
+
+
+def test_public_mode_locks_and_daily_limit(local_storage, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "PUBLIC_MODE", True)
+    monkeypatch.setattr(app, "PUBLIC_DAILY_LIMIT", 2)
+    app._usage.update(day="", count=0)
+    assert app.start_full_run() == app.LOCKED_MSG
+    assert app.start_rejudge("x") == app.LOCKED_MSG
+    assert app.import_run("{}", "x") == app.LOCKED_MSG
+    assert app.save_decision({}, "id", "Confirmed issue", "", "", "PT", "", "", "") == app.LOCKED_MSG
+    assert app.retest({}, "id") == app.LOCKED_MSG
+    assert app.export_all({}) == ([], app.LOCKED_MSG)
+    assert app.take_public_slot() and app.take_public_slot()
+    assert not app.take_public_slot()
+    qid = next(iter(app.QUESTIONS))
+    en, pt, flags, status = app.run_audit(qid)
+    assert "today's limit" in status
+    monkeypatch.setattr(app, "PUBLIC_MODE", False)
+    assert app.take_public_slot()

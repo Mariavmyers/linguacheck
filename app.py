@@ -41,6 +41,42 @@ DISCLAIMER = "⚠️ Model output under audit — not advice."
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "16000"))  # room for the model's reasoning + answer
 BATCH_WORKERS = int(os.getenv("BATCH_WORKERS", "8"))
 
+# Public mode (set PUBLIC_MODE=1 in the Space settings when the app goes public):
+# only the Confirmed errors page and a rate-limited "Ask one question" are available.
+# Everything that spends many model calls or changes the saved data is refused on the server.
+PUBLIC_MODE = os.getenv("PUBLIC_MODE", "").strip().lower() in ("1", "true", "yes")
+PUBLIC_DAILY_LIMIT = int(os.getenv("PUBLIC_DAILY_LIMIT", "30"))
+LOCKED_MSG = "🔒 Not available in the public demo."
+_usage = {"day": "", "count": 0}
+_usage_lock = threading.Lock()
+
+
+def owner_only(blocked):
+    """Refuse the call in public mode (protects hidden buttons and their API endpoints)."""
+    def wrap(fn):
+        def inner(*a, **k):
+            if PUBLIC_MODE:
+                return blocked() if callable(blocked) else blocked
+            return fn(*a, **k)
+        inner.__name__ = fn.__name__
+        inner.__doc__ = fn.__doc__
+        return inner
+    return wrap
+
+
+def take_public_slot():
+    """True if a live question may run now (daily cap in public mode only)."""
+    if not PUBLIC_MODE:
+        return True
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    with _usage_lock:
+        if _usage["day"] != today:
+            _usage.update(day=today, count=0)
+        if _usage["count"] >= PUBLIC_DAILY_LIMIT:
+            return False
+        _usage["count"] += 1
+        return True
+
 HERE = Path(__file__).parent
 QUESTIONS_FILE = HERE / "data" / "questions.csv"
 
@@ -210,6 +246,11 @@ def run_audit(qid, use_traps=True, client=None):
     if not q:
         msg = "Pick a question first."
         return msg, msg, "", ""
+    if not take_public_slot():
+        msg = (f"The public demo has reached today's limit of {PUBLIC_DAILY_LIMIT} live "
+               "questions (to protect the model credits). Please come back tomorrow, or see "
+               "the ★ Confirmed errors tab.")
+        return msg, msg, "", msg
     out, answers = {}, {}
     for lang, field in (("EN", "question_en"), ("PT-BR", "question_pt")):
         try:
@@ -284,6 +325,7 @@ def _start_job(kind, tasks, meta):
     return True
 
 
+@owner_only(LOCKED_MSG)
 def start_full_run(client=None):
     try:
         client = client or get_client()
@@ -297,6 +339,7 @@ def start_full_run(client=None):
     return job_status()
 
 
+@owner_only(LOCKED_MSG)
 def start_rejudge(source_run, client=None):
     """Judge the SAME saved answers again (no new answers): cheap, comparable."""
     if not source_run:
@@ -333,6 +376,7 @@ def job_status():
             + ("\n" + "\n".join(f"  - {e}" for e in errors[:10]) if errors else ""))
 
 
+@owner_only(LOCKED_MSG)
 def import_run(text, name):
     """Save an existing run file (JSON lines) into permanent storage, answers included."""
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
@@ -439,6 +483,7 @@ def show_finding(state, fid):
             f"Previously saved: {rev.get('decision')} at {rev.get('reviewed_at')}" if rev else "")
 
 
+@owner_only(LOCKED_MSG)
 def save_decision(state, fid, decision, category, severity, lang, notes, source, correct):
     if not fid:
         return "Pick a finding first."
@@ -453,6 +498,7 @@ def save_decision(state, fid, decision, category, severity, lang, notes, source,
     return f"✅ Saved: {decision} · {storage.where()}"
 
 
+@owner_only(LOCKED_MSG)
 def retest(state, fid, client=None):
     """Ask the same question again now (new answers) and judge: does the issue come back?"""
     r, f = find(state, fid)
@@ -517,6 +563,7 @@ def confirmed_examples(state, limit=3):
     return "".join(cards)
 
 
+@owner_only(lambda: ([], LOCKED_MSG))
 def export_all(state):
     if not state["records"]:
         return None, "Pick a run."
@@ -776,7 +823,7 @@ with gr.Blocks(title="LinguaCheck") as demo:
             a_pt = gr.Markdown(label="Resposta (PT-BR)")
         status = gr.Markdown()
 
-    with gr.Tab("2 · Review findings"):
+    with gr.Tab("2 · Review findings", visible=not PUBLIC_MODE):
         with gr.Row():
             run_pick = gr.Dropdown(label="Run", choices=[], allow_custom_value=True)
             reload_btn = gr.Button("Reload runs")
@@ -807,7 +854,7 @@ with gr.Blocks(title="LinguaCheck") as demo:
             saved_msg = gr.Markdown()
         retest_out = gr.HTML()
 
-    with gr.Tab("3 · Results"):
+    with gr.Tab("3 · Results", visible=not PUBLIC_MODE):
         res_refresh = gr.Button("Refresh numbers")
         res_md = gr.Markdown()
         gr.Markdown("### Human-confirmed examples")
@@ -816,7 +863,7 @@ with gr.Blocks(title="LinguaCheck") as demo:
         export_files = gr.File(label="Downloads", file_count="multiple")
         export_msg = gr.Markdown()
 
-    with gr.Tab("4 · Runs"):
+    with gr.Tab("4 · Runs", visible=not PUBLIC_MODE):
         gr.Markdown("**Re-judge** reuses saved answers (judge calls only, cheaper, and the trap "
                     "file comparison uses the SAME answers). **Full run** asks for new answers.")
         with gr.Row():
