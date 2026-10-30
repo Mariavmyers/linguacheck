@@ -17,8 +17,10 @@ Finding types:
 """
 
 import csv
+import hashlib
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -131,24 +133,51 @@ def code_checks_text(cc):
     return "\n".join(lines) or "No number or date differences found."
 
 
-# ------------------------------------------------------------ layer 2: AI judge
+# ------------------------------------------------------------ layer 2: AI judge (v2)
 
-JUDGE_INSTRUCTIONS = """You are an audit judge for cross-lingual consistency. You do NOT give medical, legal or financial advice. You only compare two answers that the same AI model gave to the same question, once asked in English (EN) and once in Brazilian Portuguese (PT-BR).
+JUDGE_VERSION = "v2-2026-10-29"
 
-Find every place where the two answers would leave a reader with DIFFERENT facts: a different number, unit, dose, date, deadline, frequency, warning, right, risk, step, definition, or yes/no conclusion. Also find facts that appear in one answer and are missing from the other when they matter for safety or rights. Ignore differences in style, length, order or politeness that do not change the facts.
+# Categories (v2). Only the first four count as issues.
+CATEGORIES = {
+    "contradiction": "Direct contradiction",
+    "changed_value": "Changed number, date, unit, currency or jurisdiction",
+    "consequential_omission": "Consequential omission",
+    "terminology_register": "Terminology or register issue",
+    "harmless_variation": "Harmless elaboration / acceptable variation",
+    "insufficient_evidence": "Insufficient evidence",
+}
+ISSUE_CATEGORIES = ("contradiction", "changed_value", "consequential_omission",
+                    "terminology_register")
+OLD_TYPE_MAP = {"fact_drift": "contradiction", "missing": "consequential_omission",
+                "language_trap": "terminology_register"}
+
+JUDGE_INSTRUCTIONS = """You are an audit judge for cross-lingual consistency. You do NOT give medical, legal or financial advice. You compare two answers that the same AI model gave to the same question, asked once in English (EN) and once in Brazilian Portuguese (PT-BR). The two questions have the same meaning, jurisdiction (United States) and register.
+
+Your job: find MEANINGFUL differences, the ones that would leave an English reader and a Portuguese reader with different facts or different actions. Neither language is automatically correct; do not treat English as the reference.
+
+Classify each finding with exactly one category:
+- "contradiction": the two answers make incompatible claims under the SAME conditions.
+- "changed_value": a number, dose, unit, date, deadline, currency, threshold or jurisdiction is different.
+- "consequential_omission": information present in one answer and absent in the other that CHANGES the answer to the question (a warning, a condition, a right, a deadline, a step the reader needs).
+- "terminology_register": the wording itself is wrong or misleading: a false friend, a literal calque, a Brazilian legal or product concept presented as if it were the US one, or a technical term in text meant for patients/families.
+- "harmless_variation": extra detail, examples, tone, order or an acceptable paraphrase that does not change what the reader should know or do.
+- "insufficient_evidence": you suspect a difference but the answers are too vague to be sure.
 
 Rules:
-- Quote the exact sentence from each answer as evidence (at most 40 words per quote). Inside the JSON, escape double quotes as \\" or use single quotes. If a fact is missing in one language, quote the sentence from the language that has it and write "(missing)" for the other.
-- Brazilian Portuguese writes decimals with a comma (2,5 = 2.5) and thousands with a dot (1.200 = 1,200). That is NOT a difference.
-- The question is about the UNITED STATES. If the PT-BR answer applies Brazilian law, Brazilian procedures or Brazilian products as if they were the US ones, that is fact_drift.
+- Extra information is NOT a contradiction. A general rule in one answer and a conditional exception in the other can both be true: report that only if leaving out the exception changes the answer to the question (then it is consequential_omission).
+- A Brazilian analogy is not automatically wrong. It is a problem only if it REPLACES the US concept or tells the reader the Brazilian rule applies in the US.
+- Brazilian Portuguese writes 2,5 for 2.5 and 1.200 for 1,200. That is NOT a difference.
+- Copy the evidence EXACTLY, word for word, from each answer (a short passage, at most 40 words, no paraphrase, no added words). For an omission, quote the passage from the answer that has it and write "(missing)" for the other. Inside the JSON, use single quotes inside text or escape double quotes.
+- Say which language is likely problematic: "EN", "PT", "both" or "unclear".
+- Do not report the same issue twice.
 {trap_block}
-Severity: "high" if the difference could cause harm, a wrong dose, a missed deadline, or a lost right; "medium" if it could confuse; "low" otherwise.
+Severity: "high" if it could cause harm, delay needed care, cause a wrong dose, a missed deadline, a lost right or a costly financial mistake; "medium" if it could confuse or mislead; "low" otherwise.
 
 Reply with ONLY this JSON, no other text:
-{{"findings": [{{"type": "fact_drift" | "missing" | "language_trap", "severity": "high" | "medium" | "low", "en_quote": "...", "pt_quote": "...", "explanation": "one short sentence in English", "trap_id": "trap id or null"}}], "consistent": true | false}}
-If there are no differences, reply {{"findings": [], "consistent": true}}."""
+{{"findings": [{{"category": "...", "severity": "high" | "medium" | "low", "problem_language": "EN" | "PT" | "both" | "unclear", "en_quote": "...", "pt_quote": "...", "explanation": "one short sentence in English: what differs", "consequence": "one short sentence: what could happen to the reader", "trap_id": "trap id or null"}}]}}
+If there are no meaningful differences, reply {{"findings": []}}."""
 
-TRAP_BLOCK = """- Also check the PT-BR answer against this INTERPRETER TRAP FILE, written and verified by a professional medical and legal interpreter. If the PT-BR answer uses a trap rendering in the meaning listed (even when the facts match the EN answer), report it as "language_trap" with its trap_id. A word that looks similar is only a trap when it is used with the wrong meaning in that context.
+TRAP_BLOCK = """- Also check the PT-BR answer against this INTERPRETER TRAP FILE, written and verified by a professional medical and legal interpreter. If the PT-BR answer uses a trap rendering IN THE MEANING LISTED (even when the facts match the EN answer), report it as "terminology_register" with its trap_id. A word that looks similar is only a trap when it is used with the wrong meaning in that context.
 INTERPRETER TRAP FILE:
 {traps}
 """
@@ -166,6 +195,90 @@ def build_judge_prompt(question, answer_en, answer_pt, domain, use_traps, cc):
         f"when a number is just written differently):\n{code_checks_text(cc)}"
     )
     return instructions, body
+
+
+# ------------------------------------------------------------ evidence checks
+
+MISSING = {"", "(missing)", "missing", "(ausente)", "n/a", "none", "null"}
+_WORD = re.compile(r"\w+", re.UNICODE)
+
+
+def _plain(text):
+    """Answer text as shown to the reviewer: markdown emphasis removed, typographic quotes unified."""
+    t = unicodedata.normalize("NFKC", text or "")
+    t = re.sub(r"[*_`]+", "", t)
+    for a, b in (("“", '"'), ("”", '"'), ("‘", "'"), ("’", "'"), ("–", "-"), ("—", "-")):
+        t = t.replace(a, b)
+    return t
+
+
+def quote_pattern(quote):
+    """Regex that matches the quote's words in order, ignoring punctuation, spacing and case."""
+    words = _WORD.findall(_plain(quote))
+    if not words:
+        return None
+    return re.compile(r"[\W_]*".join(re.escape(w) for w in words), re.IGNORECASE | re.UNICODE)
+
+
+def quote_spans(quote, answer):
+    """Character spans of the quote inside the plain answer text, or None if not found.
+    A quote made of fragments joined by '...' must have every fragment present, in order."""
+    if (quote or "").strip().lower() in MISSING:
+        return []
+    text = _plain(answer)
+    frags = [f for f in re.split(r"\.\.\.|…", _plain(quote)) if len(_WORD.findall(f)) >= 2]
+    if not frags:
+        frags = [_plain(quote)]
+    spans, pos = [], 0
+    for frag in frags:
+        pat = quote_pattern(frag)
+        if pat is None:
+            continue
+        m = pat.search(text, pos)
+        if not m:
+            return None
+        spans.append((m.start(), m.end()))
+        pos = m.end()
+    return spans
+
+
+def validate_finding(f, answer_en, answer_pt):
+    """Mark whether each quoted passage really exists in the saved answer."""
+    en = quote_spans(f["en_quote"], answer_en)
+    pt = quote_spans(f["pt_quote"], answer_pt)
+    en_missing = (f["en_quote"] or "").strip().lower() in MISSING
+    pt_missing = (f["pt_quote"] or "").strip().lower() in MISSING
+    if en_missing and pt_missing:
+        support = "unsupported"
+    elif (en is None and not en_missing) or (pt is None and not pt_missing):
+        support = "unsupported"
+    else:
+        support = "supported"
+    f["support"] = support
+    f["en_found"] = None if en_missing else en is not None
+    f["pt_found"] = None if pt_missing else pt is not None
+    return f
+
+
+def _key(s):
+    return " ".join(_WORD.findall(_plain(s).lower()))[:120]
+
+
+def finding_id(qid, use_traps, f):
+    """Stable ID: same question, mode, category and evidence -> same ID across reloads."""
+    raw = f"{qid}|{'with' if use_traps else 'without'}|{f['category']}|{_key(f['en_quote'])}|{_key(f['pt_quote'])}"
+    return f"{qid}-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
+
+def dedupe(findings):
+    seen, out = set(), []
+    for f in findings:
+        k = (_key(f["en_quote"]), _key(f["pt_quote"]))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(f)
+    return out
 
 
 def parse_judge_json(text):
@@ -186,26 +299,36 @@ def parse_judge_json(text):
             return None
     if not isinstance(data, dict) or "findings" not in data:
         return None
-    findings = data.get("findings") or []
     clean = []
-    for f in findings:
+    for f in data.get("findings") or []:
         if not isinstance(f, dict):
             continue
+        cat = f.get("category") or OLD_TYPE_MAP.get(f.get("type"), "insufficient_evidence")
+        if cat not in CATEGORIES:
+            cat = OLD_TYPE_MAP.get(cat, "insufficient_evidence")
+        sev = f.get("severity", "medium")
+        sev = sev if sev in ("high", "medium", "low") else "medium"
+        lang = f.get("problem_language", "unclear")
+        lang = lang if lang in ("EN", "PT", "both", "unclear") else "unclear"
+        trap = f.get("trap_id")
         clean.append({
-            "type": f.get("type", "fact_drift"),
-            "severity": f.get("severity", "medium"),
-            "en_quote": f.get("en_quote", ""),
-            "pt_quote": f.get("pt_quote", ""),
-            "explanation": f.get("explanation", ""),
-            "trap_id": f.get("trap_id") if f.get("trap_id") not in ("null", "") else None,
+            "category": cat,
+            "severity": sev,
+            "problem_language": lang,
+            "en_quote": str(f.get("en_quote") or ""),
+            "pt_quote": str(f.get("pt_quote") or ""),
+            "explanation": str(f.get("explanation") or ""),
+            "consequence": str(f.get("consequence") or ""),
+            "trap_id": trap if trap not in (None, "null", "", "None") else None,
         })
-    return {"findings": clean, "consistent": bool(data.get("consistent", not clean))}
+    return {"findings": clean}
 
 
 def judge(question, answer_en, answer_pt, chat, use_traps=True):
     """
     chat(system, user) -> final text from the Meta model.
-    Returns {"code_checks": ..., "findings": [...], "consistent": bool, "use_traps": bool}.
+    Returns {"findings": [...], "code_checks": ..., "use_traps": bool, "judge_version": str}
+    Each finding is checked against the saved answers ("support") and gets a stable "id".
     """
     cc = code_checks(answer_en, answer_pt)
     system, user = build_judge_prompt(question, answer_en, answer_pt,
@@ -215,10 +338,21 @@ def judge(question, answer_en, answer_pt, chat, use_traps=True):
     if parsed is None:  # one retry asking for JSON only
         reply = chat(system, user + "\n\nReturn ONLY the JSON object.")
         parsed = parse_judge_json(reply) or {
-            "findings": [], "consistent": None,
+            "findings": [],
             "error": "The judge did not return readable JSON.",
             "raw": (reply or "(empty reply)")[:2000],
         }
+    findings = dedupe(parsed["findings"])
+    for f in findings:
+        validate_finding(f, answer_en, answer_pt)
+        f["id"] = finding_id(question["id"], use_traps, f)
+    parsed["findings"] = findings
     parsed["code_checks"] = cc
     parsed["use_traps"] = use_traps
+    parsed["judge_version"] = JUDGE_VERSION
     return parsed
+
+
+def is_issue(f):
+    """Counts as an automated issue flag: an issue category with evidence that exists."""
+    return f["category"] in ISSUE_CATEGORIES and f.get("support") == "supported"

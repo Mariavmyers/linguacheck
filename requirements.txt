@@ -2,3 +2,6 @@ gradio>=5.0
 openai>=1.40
 python-dotenv>=1.0
 json-repair>=0.30
+huggingface_hub>=0.24
+matplotlib>=3.8
+reportlab>=4.0

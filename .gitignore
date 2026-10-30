@@ -230,3 +230,5 @@ secrets/
 # LinguaCheck local run output
 results/
 .gradio/
+local_data/
+exports/
