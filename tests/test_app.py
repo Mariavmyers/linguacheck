@@ -293,3 +293,29 @@ def test_confirmed_errors_page(local_storage):
     assert "missed by the AI judge" in html_out and "Legal overgeneralization" in html_out
     _, low_only = app.errors_page("Medical", "high", force=True)
     assert "M99" in low_only
+
+
+def test_confirmed_errors_translations(local_storage):
+    import app
+    import storage
+    rec = {"id": "L99", "domain": "Legal", "question_en": "Q?", "question_pt": "P?",
+           "with_traps": {"findings": [{"id": "L99-a", "category": "contradiction",
+                                        "severity": "high", "en_quote": "no fault",
+                                        "pt_quote": "culpa do governo", "support": "supported"}]},
+           "without_traps": {"findings": []}}
+    storage.write_text(f"runs/{app.REVIEW_RUN}.jsonl", json.dumps(rec) + "\n")
+    storage.write_text("reviews/reviews.json", json.dumps({"L99-a": {
+        "decision": "Confirmed issue", "problem_language": "PT", "correct_version": "sem culpa"}}))
+    storage.write_text("reviews/expert_added.json", json.dumps({"L99-expert-1": {
+        "question_id": "L99", "category": "terminology_register", "severity": "medium",
+        "problem_language": "PT", "evidence_pt": "agiota", "notes": "nota",
+        "correct_version": "agente"}}))
+    storage.write_text("reviews/translations.json", json.dumps({
+        "L99-a": {"pt_quote_en": "the government's fault", "correct_version_en": "no fault"},
+        "L99-expert-1": {"pt_quote_en": "loan shark", "notes_en": "note in English",
+                         "correct_version_en": "bail bond agent"}}))
+    storage._reviews_cache = None
+    _, h = app.errors_page(force=True)
+    for t in ("the government&#x27;s fault", "loan shark", "note in English", "bail bond agent",
+              "English translation"):
+        assert t in h, t

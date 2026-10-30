@@ -596,28 +596,43 @@ def load_cases(force=False):
                 confirmed.append((r, f, rev))
             elif str(rev.get("decision", "")).startswith("False alarm"):
                 false_alarms += 1
-    expert = [(by_id.get(e.get("question_id"), {}), e)
-              for e in load_expert_added().values()]
+    expert = [(k, by_id.get(e.get("question_id"), {}), e)
+              for k, e in load_expert_added().items()]
     data = {"records": records, "confirmed": confirmed, "false_alarms": false_alarms,
-            "expert": expert}
+            "expert": expert, "tr": load_translations()}
     _cases_cache.update(at=time.time(), data=data)
     return data
 
 
-def _quote_box(label, quote, wrong):
+def _en(text):
+    """English translation line shown under Portuguese text (for non-Portuguese readers)."""
+    return (f"<div style='margin-top:6px;font-size:0.9em;opacity:0.85'>"
+            f"🇺🇸 <i>English translation:</i> {esc(text)}</div>" if text else "")
+
+
+def load_translations():
+    try:
+        text = storage.read_text("reviews/translations.json")
+        return json.loads(text) if text else {}
+    except Exception:
+        return {}
+
+
+def _quote_box(label, quote, wrong, translation=""):
     missing = not quote or quote.strip().lower() in ("(missing)", "missing", "")
     if missing:
         text = ("<i>Not mentioned in this answer.</i>" if wrong
                 else "<i>✓ No problem quoted on this point.</i>")
     else:
-        text = esc(re.sub(r"\*\*|__|`", "", quote))
+        text = esc(re.sub(r"\*\*|__|`", "", quote)) + _en(translation)
     border = "2px solid #d03b3b" if wrong else "1px solid #8884"
     tag = " <span style='color:#d03b3b'>✗ problem here</span>" if wrong else ""
     return (f"<div style='flex:1;min-width:240px;border:{border};border-radius:8px;"
             f"padding:10px'><b>{label}</b>{tag}<br>{text}</div>")
 
 
-def case_card(r, f, rev, featured=False):
+def case_card(r, f, rev, featured=False, tr=None):
+    tr = tr or {}
     cat = rev.get("category") or f.get("category")
     sev = rev.get("severity") or f.get("severity")
     lang = rev.get("problem_language") or f.get("problem_language", "unclear")
@@ -631,16 +646,19 @@ def case_card(r, f, rev, featured=False):
         f"<div style='margin:6px 0 10px'><b>Question:</b> {esc(r.get('question_en', ''))}</div>"
         "<div style='display:flex;gap:10px;flex-wrap:wrap'>"
         + _quote_box("Muse in English", f.get("en_quote"), lang in ("EN", "both"))
-        + _quote_box("Muse in Portuguese", f.get("pt_quote"), lang in ("PT", "both"))
+        + _quote_box("Muse in Portuguese", f.get("pt_quote"), lang in ("PT", "both"),
+                     tr.get("pt_quote_en"))
         + "</div>"
         f"<div style='margin-top:10px'><b>Expert verdict:</b> {esc(rev.get('notes', ''))}</div>"
         + (f"<div style='margin-top:6px;background:#22c55e1a;padding:8px;border-radius:6px'>"
-           f"<b>Correct version:</b> {esc(correct)}</div>" if correct else "")
+           f"<b>Correct version:</b> {esc(correct)}{_en(tr.get('correct_version_en'))}</div>"
+           if correct else "")
         + f"<div style='margin-top:6px;font-size:0.85em;opacity:0.8'>Source: "
         f"{esc(rev.get('source', ''))}</div></div>")
 
 
-def expert_card(r, e):
+def expert_card(r, e, tr=None):
+    tr = tr or {}
     lang = e.get("problem_language", "unclear")
     return (
         "<div style='border:2px dashed #eb6834;border-radius:10px;padding:14px;margin:12px 0'>"
@@ -650,11 +668,14 @@ def expert_card(r, e):
         f"<div style='margin:6px 0 10px'><b>Question:</b> {esc(r.get('question_en', ''))}</div>"
         "<div style='display:flex;gap:10px;flex-wrap:wrap'>"
         + _quote_box("Muse in English", e.get("evidence_en"), lang in ("EN", "both"))
-        + _quote_box("Muse in Portuguese", e.get("evidence_pt"), lang in ("PT", "both"))
+        + _quote_box("Muse in Portuguese", e.get("evidence_pt"), lang in ("PT", "both"),
+                     tr.get("pt_quote_en"))
         + "</div>"
-        f"<div style='margin-top:10px'><b>Expert finding:</b> {esc(e.get('notes', ''))}</div>"
+        f"<div style='margin-top:10px'><b>Expert finding:</b> {esc(e.get('notes', ''))}"
+        f"{_en(tr.get('notes_en'))}</div>"
         + (f"<div style='margin-top:6px;background:#22c55e1a;padding:8px;border-radius:6px'>"
-           f"<b>Correct version:</b> {esc(e.get('correct_version'))}</div>"
+           f"<b>Correct version:</b> {esc(e.get('correct_version'))}"
+           f"{_en(tr.get('correct_version_en'))}</div>"
            if e.get("correct_version") else "")
         + f"<div style='margin-top:6px;font-size:0.85em;opacity:0.8'>Source: "
         f"{esc(e.get('source', ''))}</div></div>")
@@ -699,11 +720,13 @@ def errors_page(domain="All", min_sev="All", force=False):
     cases.sort(key=lambda c: (feat.get(c[1].get("id"), 99),
                               order.get(c[2].get("severity") or c[1]["severity"], 2),
                               c[0].get("id", "")))
-    html_out = "".join(case_card(r, f, rev, f.get("id") in feat) for r, f, rev in cases)
-    exp = [x for x in data["expert"] if domain == "All" or x[0].get("domain") == domain]
+    tr = data.get("tr", {})
+    html_out = "".join(case_card(r, f, rev, f.get("id") in feat, tr.get(f.get("id")))
+                       for r, f, rev in cases)
+    exp = [x for x in data["expert"] if domain == "All" or x[1].get("domain") == domain]
     if exp:
         html_out += ("<h3>🧠 Caught by the expert, missed by the AI judge</h3>"
-                     + "".join(expert_card(r, e) for r, e in exp))
+                     + "".join(expert_card(r, e, tr.get(k)) for k, r, e in exp))
     if not html_out:
         html_out = "<i>No confirmed cases for this filter.</i>"
     return errors_summary(data), html_out
