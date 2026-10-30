@@ -263,3 +263,33 @@ def test_full_run_saves_answers_and_both_judgments():
     assert len(recs) == 2 and meta["complete"] is True and meta["temperature"] == 0
     assert recs[0]["answer_en"] and recs[0]["with_traps"]["judge_version"] == judge.JUDGE_VERSION
     assert "without_traps" in recs[0]
+
+
+def test_confirmed_errors_page(local_storage):
+    import app
+    import storage
+    rec = {"id": "M99", "domain": "Medical", "category": "x", "risk": "High",
+           "question_en": "Q?", "question_pt": "P?", "answer_en": "a", "answer_pt": "b",
+           "with_traps": {"findings": [
+               {"id": "M99-a", "category": "changed_value", "severity": "high",
+                "en_quote": "one **hour**", "pt_quote": "duas horas", "support": "supported"},
+               {"id": "M99-b", "category": "consequential_omission", "severity": "low",
+                "en_quote": "call 911", "pt_quote": "(missing)", "support": "supported"}]},
+           "without_traps": {"findings": []}}
+    storage.write_text(f"runs/{app.REVIEW_RUN}.jsonl", json.dumps(rec) + "\n")
+    storage.write_text("reviews/reviews.json", json.dumps({
+        "M99-a": {"decision": "Confirmed issue", "problem_language": "PT", "notes": "n",
+                  "source": "s", "correct_version": "uma hora"},
+        "M99-b": {"decision": "False alarm / acceptable variation"}}))
+    storage.write_text("reviews/expert_added.json", json.dumps({
+        "M99-x": {"question_id": "M99", "category": "legal_overgeneralization",
+                  "severity": "medium", "problem_language": "PT", "evidence_pt": "z",
+                  "notes": "caught"}}))
+    storage._reviews_cache = None
+    md, html_out = app.errors_page(force=True)
+    assert "1 confirmed cross-language problems in 1 of 1 questions" in md
+    assert "100% of 2" not in md and "50% of 2" in md
+    assert "uma hora" in html_out and "**" not in html_out
+    assert "missed by the AI judge" in html_out and "Legal overgeneralization" in html_out
+    _, low_only = app.errors_page("Medical", "high", force=True)
+    assert "M99" in low_only

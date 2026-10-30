@@ -8,6 +8,7 @@ Keys come only from environment variables / Space Secrets, never from code:
                     (DATA_REPO, default hugmarie/linguacheck-data)
 
 Tabs:
+  ★  Confirmed errors       expert-confirmed cases (the public results page)
   1. Ask one question         live EN vs PT-BR answers + judge
   2. Review findings          evidence screen + the interpreter's decisions (saved permanently)
   3. Results                  honest metrics, trap-file comparison, exports, PDF
@@ -556,6 +557,158 @@ def export_all(state):
                                     f"{saved}{msg}")
 
 
+# ---------------------------------------------------------------- confirmed errors (public page)
+
+REVIEW_RUN = os.getenv("REVIEW_RUN", "rejudge_20261030-015756")
+FEATURED = ["L07-31a066e75a", "M06-fb23f38106", "F03-933b4e776f", "M21-183f4f9665",
+            "L14-9d4ffc5809"]
+EXTRA_CATEGORIES = {"legal_overgeneralization": "Legal overgeneralization"}
+LANG_NAME = {"PT": "Portuguese (PT-BR)", "EN": "English", "both": "Both", "unclear": "Unclear"}
+_cases_cache = {"at": 0, "data": None}
+
+
+def _cat_label(c):
+    return judge.CATEGORIES.get(c) or EXTRA_CATEGORIES.get(c) or str(c).replace("_", " ").capitalize()
+
+
+def load_expert_added():
+    try:
+        text = storage.read_text("reviews/expert_added.json")
+        return json.loads(text) if text else {}
+    except Exception:
+        return {}
+
+
+def load_cases(force=False):
+    """Expert-confirmed findings for the reviewed run (cached 5 minutes)."""
+    if not force and _cases_cache["data"] and time.time() - _cases_cache["at"] < 300:
+        return _cases_cache["data"]
+    records, meta = storage.load_run(REVIEW_RUN)
+    reviews = storage.load_reviews(refresh=True)
+    by_id = {r["id"]: r for r in records}
+    confirmed, false_alarms = [], 0
+    for r in records:
+        for f in r.get("with_traps", {}).get("findings", []):
+            rev = reviews.get(f.get("id"))
+            if not rev:
+                continue
+            if rev.get("decision") == "Confirmed issue":
+                confirmed.append((r, f, rev))
+            elif str(rev.get("decision", "")).startswith("False alarm"):
+                false_alarms += 1
+    expert = [(by_id.get(e.get("question_id"), {}), e)
+              for e in load_expert_added().values()]
+    data = {"records": records, "confirmed": confirmed, "false_alarms": false_alarms,
+            "expert": expert}
+    _cases_cache.update(at=time.time(), data=data)
+    return data
+
+
+def _quote_box(label, quote, wrong):
+    missing = not quote or quote.strip().lower() in ("(missing)", "missing", "")
+    if missing:
+        text = ("<i>Not mentioned in this answer.</i>" if wrong
+                else "<i>✓ No problem quoted on this point.</i>")
+    else:
+        text = esc(re.sub(r"\*\*|__|`", "", quote))
+    border = "2px solid #d03b3b" if wrong else "1px solid #8884"
+    tag = " <span style='color:#d03b3b'>✗ problem here</span>" if wrong else ""
+    return (f"<div style='flex:1;min-width:240px;border:{border};border-radius:8px;"
+            f"padding:10px'><b>{label}</b>{tag}<br>{text}</div>")
+
+
+def case_card(r, f, rev, featured=False):
+    cat = rev.get("category") or f.get("category")
+    sev = rev.get("severity") or f.get("severity")
+    lang = rev.get("problem_language") or f.get("problem_language", "unclear")
+    star = "⭐ " if featured else ""
+    correct = rev.get("correct_version") or ""
+    return (
+        "<div style='border:1px solid #8886;border-radius:10px;padding:14px;margin:12px 0'>"
+        f"<div style='font-size:0.85em;opacity:0.8'>{star}{esc(r.get('id', ''))} · "
+        f"{esc(r.get('domain', ''))} · {SEV_ICON.get(sev, sev)} · {esc(_cat_label(cat))} · "
+        f"wrong language: <b>{esc(LANG_NAME.get(lang, lang))}</b></div>"
+        f"<div style='margin:6px 0 10px'><b>Question:</b> {esc(r.get('question_en', ''))}</div>"
+        "<div style='display:flex;gap:10px;flex-wrap:wrap'>"
+        + _quote_box("Muse in English", f.get("en_quote"), lang in ("EN", "both"))
+        + _quote_box("Muse in Portuguese", f.get("pt_quote"), lang in ("PT", "both"))
+        + "</div>"
+        f"<div style='margin-top:10px'><b>Expert verdict:</b> {esc(rev.get('notes', ''))}</div>"
+        + (f"<div style='margin-top:6px;background:#22c55e1a;padding:8px;border-radius:6px'>"
+           f"<b>Correct version:</b> {esc(correct)}</div>" if correct else "")
+        + f"<div style='margin-top:6px;font-size:0.85em;opacity:0.8'>Source: "
+        f"{esc(rev.get('source', ''))}</div></div>")
+
+
+def expert_card(r, e):
+    lang = e.get("problem_language", "unclear")
+    return (
+        "<div style='border:2px dashed #eb6834;border-radius:10px;padding:14px;margin:12px 0'>"
+        f"<div style='font-size:0.85em;opacity:0.8'>🧠 {esc(e.get('question_id', ''))} · "
+        f"{esc(r.get('domain', ''))} · {SEV_ICON.get(e.get('severity'), e.get('severity'))} · "
+        f"{esc(_cat_label(e.get('category')))} · missed by the AI judge, caught by the expert</div>"
+        f"<div style='margin:6px 0 10px'><b>Question:</b> {esc(r.get('question_en', ''))}</div>"
+        "<div style='display:flex;gap:10px;flex-wrap:wrap'>"
+        + _quote_box("Muse in English", e.get("evidence_en"), lang in ("EN", "both"))
+        + _quote_box("Muse in Portuguese", e.get("evidence_pt"), lang in ("PT", "both"))
+        + "</div>"
+        f"<div style='margin-top:10px'><b>Expert finding:</b> {esc(e.get('notes', ''))}</div>"
+        + (f"<div style='margin-top:6px;background:#22c55e1a;padding:8px;border-radius:6px'>"
+           f"<b>Correct version:</b> {esc(e.get('correct_version'))}</div>"
+           if e.get("correct_version") else "")
+        + f"<div style='margin-top:6px;font-size:0.85em;opacity:0.8'>Source: "
+        f"{esc(e.get('source', ''))}</div></div>")
+
+
+def errors_summary(data):
+    conf = data["confirmed"]
+    n_q = len(data["records"]) or 75
+    decided = len(conf) + data["false_alarms"]
+    from collections import Counter
+    sev = Counter((rev.get("severity") or f["severity"]) for _, f, rev in conf)
+    lang = Counter((rev.get("problem_language") or "unclear") for _, f, rev in conf)
+    dom = Counter(r.get("domain") for r, _, _ in conf)
+    qs = len({r["id"] for r, _, _ in conf})
+    prec = f"{len(conf) / decided:.0%}" if decided else "n/a"
+    return (
+        f"### {len(conf)} confirmed cross-language problems in {qs} of {n_q} questions\n"
+        f"Every case below was **flagged by LinguaCheck** and **confirmed by a professional "
+        f"medical & legal interpreter (EN/PT-BR)** against official sources. The model's answers "
+        f"are shown exactly as generated.\n\n"
+        f"| Severity | Wrong language | Domain | Judge accuracy |\n|---|---|---|---|\n"
+        f"| 🔴 {sev['high']} high · 🟠 {sev['medium']} medium · 🟡 {sev['low']} low "
+        f"| Portuguese {lang['PT']} · English {lang['EN']} "
+        f"| Finance {dom['Finance']} · Legal {dom['Legal']} · Medical {dom['Medical']} "
+        f"| {prec} of {decided} expert-decided flags were real |\n\n"
+        f"Plus **{len(data['expert'])} errors the AI judge missed and the expert caught.**\n\n"
+        f"_Limits: {n_q} fictional test questions; flags not yet reviewed are not counted; "
+        f"answers without flags were not checked for missed errors (recall not measured)._")
+
+
+def errors_page(domain="All", min_sev="All", force=False):
+    try:
+        data = load_cases(force)
+    except Exception as e:
+        return f"⚠️ Could not load the reviewed results: {esc(e)}", ""
+    order = {"high": 0, "medium": 1, "low": 2}
+    keep = {"All": 3, "high": 0, "medium": 1, "low": 2}[min_sev]
+    cases = [c for c in data["confirmed"]
+             if (domain == "All" or c[0].get("domain") == domain)
+             and order.get(c[2].get("severity") or c[1]["severity"], 2) <= keep]
+    feat = {fid: i for i, fid in enumerate(FEATURED)}
+    cases.sort(key=lambda c: (feat.get(c[1].get("id"), 99),
+                              order.get(c[2].get("severity") or c[1]["severity"], 2),
+                              c[0].get("id", "")))
+    html_out = "".join(case_card(r, f, rev, f.get("id") in feat) for r, f, rev in cases)
+    exp = [x for x in data["expert"] if domain == "All" or x[0].get("domain") == domain]
+    if exp:
+        html_out += ("<h3>🧠 Caught by the expert, missed by the AI judge</h3>"
+                     + "".join(expert_card(r, e) for r, e in exp))
+    if not html_out:
+        html_out = "<i>No confirmed cases for this filter.</i>"
+    return errors_summary(data), html_out
+
+
 # ---------------------------------------------------------------- page
 
 DECISION_CHOICES = audit.DECISIONS
@@ -572,6 +725,16 @@ with gr.Blocks(title="LinguaCheck") as demo:
         f"Storage: {storage.where()}."
     )
     state = gr.State({"run_id": None, "records": [], "meta": {}})
+
+    with gr.Tab("★ Confirmed errors"):
+        err_summary = gr.Markdown()
+        with gr.Row():
+            err_domain = gr.Radio(["All", "Medical", "Legal", "Finance"], value="All",
+                                  label="Domain")
+            err_sev = gr.Radio(["All", "high", "medium", "low"], value="All",
+                               label="Minimum severity")
+            err_refresh = gr.Button("Refresh")
+        err_cards = gr.HTML()
 
     with gr.Tab("1 · Ask one question"):
         pick = gr.Dropdown(choices=CHOICES, label=f"Question ({len(CHOICES)} verified)",
@@ -647,6 +810,11 @@ with gr.Blocks(title="LinguaCheck") as demo:
             imp_msg = gr.Markdown()
 
     # ---- wiring
+    demo.load(errors_page, inputs=[err_domain, err_sev], outputs=[err_summary, err_cards])
+    for ctl in (err_domain, err_sev):
+        ctl.change(errors_page, inputs=[err_domain, err_sev], outputs=[err_summary, err_cards])
+    err_refresh.click(lambda d, s: errors_page(d, s, force=True), inputs=[err_domain, err_sev],
+                      outputs=[err_summary, err_cards])
     pick.change(show_question, inputs=pick, outputs=[q_en, q_pt, key_box])
     demo.load(show_question, inputs=pick, outputs=[q_en, q_pt, key_box])
     go.click(run_audit, inputs=[pick, use_traps], outputs=[a_en, a_pt, flags, status])
