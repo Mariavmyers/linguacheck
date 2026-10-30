@@ -485,7 +485,12 @@ def build_v2(records, meta, reviews, out_path):
                   f"{g['added_by_guide']['not_reviewed']}). Flags found only without it: "
                   f"{g['removed_with_guide']['count']}. Same evidence, different category: "
                   f"{g['reclassified']}. More flags alone is not an improvement; what counts is how "
-                  "many of the extra flags the interpreter confirms.", st["body"]),
+                  "many of the extra flags the interpreter confirms."
+                  + (" Many flags appear in only one of the two judgments in both directions, so much "
+                     "of this difference is the judge varying between calls, not the trap file; only "
+                     "reviewed decisions can show the trap file's real effect."
+                     if g["removed_with_guide"]["count"] > 0.5 * max(1, g["added_by_guide"]["count"])
+                     else ""), st["body"]),
               PageBreak()]
 
     rows.sort(key=lambda x: (list(STATUS_COLOR).index(x[5]), SEV_ORDER.get(x[4], 3), x[0]["id"]))

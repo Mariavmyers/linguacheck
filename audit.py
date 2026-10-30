@@ -200,6 +200,10 @@ def metrics_markdown(m):
         f"same evidence, different category: {g['reclassified']}",
         "- More flags alone is not an improvement: judge the trap file by how many of its "
         "extra flags you confirm.",
+        ("- ⚠️ Many flags appear only in one of the two judgments in BOTH directions: much of this "
+         "difference is the judge varying between calls, not the trap file. Only reviewed "
+         "decisions can show the trap file's real effect."
+         if g["removed_with_guide"]["count"] > 0.5 * max(1, g["added_by_guide"]["count"]) else ""),
         "",
         "_No flag does not mean both answers are correct. Unreviewed flags are possible "
         "differences, not proven errors._",
