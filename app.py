@@ -15,6 +15,17 @@ Tabs:
   4. Runs                     full audit of all questions, re-judge saved answers
 """
 
+# ZeroGPU hardware requires at least one @spaces.GPU function at startup.
+# LinguaCheck itself runs on CPU and calls the model on Baseten.
+try:
+    import spaces
+
+    @spaces.GPU
+    def _zerogpu_placeholder():
+        return None
+except Exception:
+    pass
+
 import csv
 import html
 import json
@@ -665,13 +676,16 @@ def load_translations():
         return {}
 
 
-def _quote_box(label, quote, wrong, translation=""):
+def _quote_box(label, quote, wrong, translation="", omitted=False):
     missing = not quote or quote.strip().lower() in ("(missing)", "missing", "")
     if missing:
-        text = ("<i>Not mentioned in this answer.</i>" if wrong
+        text = ("<b>Left out.</b> This answer never says this. The missing information is the error: compare with the other language's box and the correct version below." if wrong
                 else "<i>✓ No problem quoted on this point.</i>")
     else:
         text = esc(re.sub(r"\*\*|__|`", "", quote)) + _en(translation)
+        if omitted and wrong:
+            text = ("<b>Left out</b> what the other language says. "
+                    "What this answer said on that topic instead:<br>" + text)
     border = "2px solid #d03b3b" if wrong else "1px solid #8884"
     tag = " <span style='color:#d03b3b'>✗ problem here</span>" if wrong else ""
     return (f"<div style='flex:1;min-width:240px;border:{border};border-radius:8px;"
@@ -692,11 +706,11 @@ def case_card(r, f, rev, featured=False, tr=None):
         f"wrong language: <b>{esc(LANG_NAME.get(lang, lang))}</b></div>"
         f"<div style='margin:6px 0 10px'><b>Question:</b> {esc(r.get('question_en', ''))}</div>"
         "<div style='display:flex;gap:10px;flex-wrap:wrap'>"
-        + _quote_box("Muse in English", f.get("en_quote"), lang in ("EN", "both"))
-        + _quote_box("Muse in Portuguese", f.get("pt_quote"), lang in ("PT", "both"),
-                     tr.get("pt_quote_en"))
+        + _quote_box("Muse in English", tr.get("en_quote_display") or f.get("en_quote"), lang in ("EN", "both"), "", bool(tr.get("omission")))
+        + _quote_box("Muse in Portuguese", tr.get("pt_quote_display") or f.get("pt_quote"), lang in ("PT", "both"),
+                     tr.get("pt_quote_en"), bool(tr.get("omission")))
         + "</div>"
-        f"<div style='margin-top:10px'><b>Expert verdict:</b> {esc(rev.get('notes', ''))}</div>"
+        f"<div style='margin-top:10px'><b>Reviewer verdict</b> (decided by the interpreter; wording may be AI-assisted): {esc(rev.get('notes', ''))}</div>"
         + (f"<div style='margin-top:6px;background:#22c55e1a;padding:8px;border-radius:6px'>"
            f"<b>Correct version:</b> {esc(correct)}{_en(tr.get('correct_version_en'))}</div>"
            if correct else "")
@@ -711,14 +725,14 @@ def expert_card(r, e, tr=None):
         "<div style='border:2px dashed #eb6834;border-radius:10px;padding:14px;margin:12px 0'>"
         f"<div style='font-size:0.85em;opacity:0.8'>🧠 {esc(e.get('question_id', ''))} · "
         f"{esc(r.get('domain', ''))} · {SEV_ICON.get(e.get('severity'), e.get('severity'))} · "
-        f"{esc(_cat_label(e.get('category')))} · missed by the AI judge, caught by the expert</div>"
+        f"{esc(_cat_label(e.get('category')))} · missed by the AI judge, caught by the interpreter</div>"
         f"<div style='margin:6px 0 10px'><b>Question:</b> {esc(r.get('question_en', ''))}</div>"
         "<div style='display:flex;gap:10px;flex-wrap:wrap'>"
         + _quote_box("Muse in English", e.get("evidence_en"), lang in ("EN", "both"))
         + _quote_box("Muse in Portuguese", e.get("evidence_pt"), lang in ("PT", "both"),
                      tr.get("pt_quote_en"))
         + "</div>"
-        f"<div style='margin-top:10px'><b>Expert finding:</b> {esc(e.get('notes', ''))}"
+        f"<div style='margin-top:10px'><b>Reviewer finding</b> (by the interpreter; wording may be AI-assisted): {esc(e.get('notes', ''))}"
         f"{_en(tr.get('notes_en'))}</div>"
         + (f"<div style='margin-top:6px;background:#22c55e1a;padding:8px;border-radius:6px'>"
            f"<b>Correct version:</b> {esc(e.get('correct_version'))}"
@@ -738,18 +752,23 @@ def errors_summary(data):
     dom = Counter(r.get("domain") for r, _, _ in conf)
     qs = len({r["id"] for r, _, _ in conf})
     prec = f"{len(conf) / decided:.0%}" if decided else "n/a"
+    total_flags = sum(len(r.get("with_traps", {}).get("findings", [])) for r in data["records"])
     return (
         f"### {len(conf)} confirmed cross-language problems in {qs} of {n_q} questions\n"
-        f"Every case below was **flagged by LinguaCheck** and **confirmed by a professional "
-        f"medical & legal interpreter (EN/PT-BR)** against official sources. The model's answers "
-        f"are shown exactly as generated.\n\n"
-        f"| Severity | Wrong language | Domain | Judge accuracy |\n|---|---|---|---|\n"
+        f"Every case below was **flagged by LinguaCheck** and **confirmed in a linguistic review by a "
+        f"professional medical & legal interpreter (EN/PT-BR)**. The interpreter is not a physician, "
+        f"attorney or accountant; sources are listed where they were checked. Muse's original answers "
+        f"are preserved exactly as generated; the boxes show excerpts selected for review.\n\n"
+        f"| Severity | Wrong language | Domain | Human review of AI flags |\n|---|---|---|---|\n"
         f"| 🔴 {sev['high']} high · 🟠 {sev['medium']} medium · 🟡 {sev['low']} low "
         f"| Portuguese {lang['PT']} · English {lang['EN']} "
         f"| Finance {dom['Finance']} · Legal {dom['Legal']} · Medical {dom['Medical']} "
-        f"| {prec} of {decided} expert-decided flags were real |\n\n"
-        f"Plus **{len(data['expert'])} errors the AI judge missed and the expert caught.**\n\n"
-        f"_Limits: {n_q} fictional test questions; flags not yet reviewed are not counted; "
+        f"| {len(conf)} of {decided} reviewed flags confirmed ({prec}). Review prioritized "
+        f"high-severity flags; {total_flags - decided} of {total_flags} flags not yet reviewed |\n\n"
+        f"Plus **{len(data['expert'])} errors the AI judge missed and the interpreter caught** "
+        f"(not counted in the {len(conf)}).\n\n"
+        f"_Limits: {n_q} fictional, deliberately difficult test questions, so this is not a general "
+        f"error rate for the model; flags not yet reviewed are not counted; "
         f"answers without flags were not checked for missed errors (recall not measured)._")
 
 

@@ -288,7 +288,8 @@ def test_confirmed_errors_page(local_storage):
     storage._reviews_cache = None
     md, html_out = app.errors_page(force=True)
     assert "1 confirmed cross-language problems in 1 of 1 questions" in md
-    assert "100% of 2" not in md and "50% of 2" in md
+    assert "100%" not in md and "1 of 2 reviewed flags confirmed (50%)" in md
+    assert "0 of 2 flags not yet reviewed" in md and "not a general" in md
     assert "uma hora" in html_out and "**" not in html_out
     assert "missed by the AI judge" in html_out and "Legal overgeneralization" in html_out
     _, low_only = app.errors_page("Medical", "high", force=True)
