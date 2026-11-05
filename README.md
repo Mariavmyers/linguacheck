@@ -10,6 +10,8 @@ pinned: false
 
 # LinguaCheck
 
+▶️ **Demo video (2:47):** https://youtu.be/X9qs2wmBoCU · **Live app:** https://huggingface.co/spaces/hugmarie/linguacheck
+
 **Benchmarks ask *"is the AI right?"* LinguaCheck asks *"does the AI say the same thing in every language?"***
 
 LinguaCheck is a **cross-lingual factual consistency evaluator** for Meta's AI models. It asks the same medical, legal or finance question in **English** and **Brazilian Portuguese**, compares the two answers, and flags **cross-lingual drift**: places where the model gives different facts, warnings, numbers, deadlines or rights depending on the language it is asked in. A professional interpreter then reviews the flags.
