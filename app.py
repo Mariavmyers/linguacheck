@@ -810,6 +810,7 @@ with gr.Blocks(title="LinguaCheck") as demo:
         "the same medical, legal or finance question in English and Brazilian Portuguese, flags "
         "meaningful differences with the exact evidence, and lets a professional interpreter "
         "confirm or reject each flag.\n\n"
+        "▶️ **Demo video:** https://youtu.be/X9qs2wmBoCU\n\n"
         f"Model: **{MODEL_LABEL}** · temperature 0 · {DISCLAIMER} All test cases are fictional. "
         f"Storage: {storage.where()}."
     )
